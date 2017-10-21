@@ -1,5 +1,5 @@
 
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE LambdaCase, RecordWildCards, TupleSections #-} 
 module Main where
 import Control.Concurrent
 import Control.Concurrent.STM
@@ -74,147 +74,237 @@ ie "CHAT: 101\nJOIN_ID: 71\nCLIENT_NAME: chaosladdah\nMESSAGE: "hey\n\n""
 		  MESSAGE: [string terminated with '\n\n']
 ie "CHAR: 101\nCLIENT_NAME: chaosladdah\nMESSAGE: "hey\n\n""
 -}
+--CLIENT CODE
 type ClientName = String
 data Client = Client
   { clientName     :: ClientName
-	, clientHandle :: Handle
-	, clientIP :: Maybe Int
-	, clientPort :: Maybe Int
-	, clientSendChan :: TChan Message
+  , clientHandle :: Handle
+  , clientIP :: Maybe Int
+  , clientPort :: Maybe Int
+  , clientSendChan :: TVar (Maybe (Room, TChan Message))
 }
-data Message = Notice String
-	| Tell ClientName String
-	| Broadcast ClientName String
-	| Command String
-
 newClient :: ClientName -> Handle -> Maybe Int->Maybe Int ->STM Client
 newClient name handle ip port = do
-	c <- newTChan
-	return Client { clientName = name,
-	clientHandle = handle,
-	clientIP = ip,
-	clientPort = port,
-	clientSendChan = c
+  c <- newTChan
+  return Client { clientName = name,
+  clientHandle = handle,
+  clientIP = ip,
+  clientPort = port,
+  clientSendChan = c
 }
 
+clientGetChan :: Client -> STM (Maybe Channel)
+clientGetChan = (fmap . fmap) fst . readTVar . clientChan
+
+
+clientGetTChan :: Client -> STM (Maybe (TChan Message))
+clientGetTChan = (fmap . fmap) snd . readTVar . clientChan
+
+clientReadMessage :: Client -> STM Message
+clientReadMessage client =  readBroadcast
+  where
+    readBroadcast :: STM Message
+    readBroadcast = clientGetTChan client >>= maybe retry readTChan
+
+clientLeaveRoom :: LeaveReason -> CLient -> STM ()
+clientLeaveRoom reason client@Client{..} = readTvar clientChan >>= \case
+  Nothing -> notify client "You're not in a room"
+  Just(curRoom, _) -> do
+    notify client $ "TODO PUT IN PROTOCOL"
+    roomRemoveClient reson curRoom clientName
+    writeTVar clientSendChan Nothing
+
+clientJoinRoom :: JoinReason -> Client -> Room -> STM (Maybe Channel)
+clientJoinRoom reason client@Client{..} newChan = readTVar clientChan >>= \case
+    -- Not in a channel - just join the new one.
+    Nothing -> do
+        clientJoinRoom'
+        return Nothing
+    -- In a channel - leave the current one. Old broadcast chan will get
+    -- garbage collected.
+    Just (curChan, _) 
+        | roomName curRoom == roomName newRoom -> do
+            notify client "You're already in that channel."
+            return Nothing
+        | otherwise -> do
+            -- Join other channel first, because chanRemoveClient will broadcast a
+            -- leave message. We don't want to see that message ourselves, because
+            -- we know we've left the channel.
+            clientJoinRoom'
+            roomRemoveClient LeaveReasonLeft curRemove clientName
+            return (Just curRemove)
+  where
+    clientJoinRoom' :: STM ()
+    clientJoinRoom' = do
+        notify client $ "TODO PROTOCL " ++ channelName newChan
+
+        -- Make this call before duping the channel, so we don't see our own
+        -- join message broadcast to the channel.
+        roomAddClient reason newRoom clientName
+        dupTChan (roomBroadcastChan newChan) >>=
+            writeTVar clientChan . Just . (newChan,)
+
+clientBroadcastToRoom :: Client -> String -> STM ()
+clientBroadcastToRoom client@Client{..} msg = 
+    clientGetChan client >>= maybe (return ()) (\c -> chanBroadcast c clientName msg)
+
+notify :: Client -> String -> STM ()
+notify client = sendMessage client . Notice
+
+--ROOM CODE
+type RoomName = String
+type RoomRef = Int
+data Room = Room
+  { roomName :: RoomName
+  , roomRef :: RoomRef
+  , roomClients :: TVar (set ClientName)
+  , rommBroadcastChan :: TChan Message
+}
+data LeaveReason
+    = LeaveReasonLeft
+    | LeaveReasonDisconnected
+
+data JoinReason
+    = JoinReasonJoined
+    | JoinReasonConnected
+newRoom :: RoomName -> STM Room
+newRoom name = Room name <$> newTVar S.empty <*> newBroadcastTChan
+
+roomRemoveClient  :: LeaveReason -> RoomRef -> RoomName -> STM()
+roomRemoveClient LeaveReasonLeft = roomRemoveClient' roomNotifyHasLeft
+roomRemoveClient LeaveReasonDisconnected = roomRemoveClient' roomNotifyHasDisconnected
+
+roomRemoveClient' :: (Room -> ClientName -> STM ()) -> Room -> ClientName -> STM ()
+roomRemoveClient' notifyAction rm@Room{..} name = do
+    notifyAction rm name
+    modifyTVar RoomClients . S.delete $ name
+
+roomAddClient :: JoinReason -> Room -> ClientName -> STM ()
+roomAddClient JoinReasonJoined    = roomAddClient' roomNotifyHasJoined
+roomAddClient JoinReasonConnected = roomAddClient' roomNotifyHasConnected
+
+roomAddClient' :: (Room -> ClientName -> STM ()) -> Room -> ClientName -> STM ()
+roomAddClient' notifyAction rm@Room{..} name = do
+    notifyAction rm name
+    modifyTVar roomClients . S.insert $ name
+
+roomNotifyHasLeft :: Room -> ClientName -> STM ()
+roomNotifyHasLeft room name = roomNotify room (name ++ " has left the channel.")
+
+-- Notify the channel a client has disconnected.
+roomNotifyHasDisconnected :: Room -> ClientName -> STM ()
+roomNotifyHasDisconnected room name = roomNotify room (name ++ " has disconnected.")
+
+-- Notify the channel a client has joined.
+roomNotifyHasJoined :: Room -> ClientName -> STM ()
+roomNotifyHasJoined room name = roomNotify room (name ++ " has joined the channel.")
+
+-- Notify the channel a client has connected.
+roomNotifyHasConnected :: Room -> ClientName -> STM ()
+roomNotifyHasConnected room name = roomNotify room (name ++ " has connected.")
+
+-- Send a Message to the channel.
+roomMessage :: Room -> Message -> STM ()
+roomMessage = writeTChan . roomBroadcastChan
+
+-- Send a Broadcast to the channel, from a client.
+roomBroadcast :: Room -> ClientName -> String -> STM ()
+roomBroadcast room@Room{..} clientName msg = roomMessage room (Broadcast roomRef clientName msg)
+
+-- Send a Notice to the channel.
+roomNotify :: Room -> String -> STM ()
+roomNotify room = roomMessage room . Notice
+
+--SERVER CODE
 data Server = Server
-  { clients :: TVar (Map ClientName Client)
-  }
+    { serverRooms :: TVar (Map RoomName Rooom)
+    , serverClients  :: TVar (Map ClientName Client)
+    }
 newServer :: IO Server
-newServer = do
-	c <- newTVarIO Map.empty
-	return Server {clients = c}
+newServer = do 
+  server <- Server <$> newTVar M.empty <*> newTVar M.empty
+  return server
 
-broadcast :: Server -> Message -> STM ()
-broadcast Server{..} msg = do
-  clientmap <- readTVar clients
-  mapM_ (\client -> sendMessage client msg) (Map.elems clientmap)
+addRoom :: Server -> RoomName -> STM ()
+addRoom Server{..} name = new Room name >>= modifyTVar serverRooms . M.insert name
 
-sendMessage :: Client -> Message -> STM ()
-sendMessage Client{..} msg =
-  writeTChan clientSendChan msg
--- >>
+removeClient :: Server -> Client -> IO ()
+removeCLient Server{..} client@Client{..} = atomically $ do
+  clientLeaveRoom LeaveReasonDisconnected client
+  modifyTVar' serverClients $ M.delete clientName
 
--- <<sendToName
-sendToName :: Server -> ClientName -> Message -> STM Bool
-sendToName server@Server{..} name msg = do
-  clientmap <- readTVar clients
-  case Map.lookup name clientmap of
-    Nothing     -> return False
-    Just client -> sendMessage client msg >> return True
--- >>
+lookupRoom :: Server -> RoomName -> STM (Maybe Room)
+lookupRoom Server{..} name = M.lookup name <$> readTVar serverRooms
 
-tell :: Server -> Client -> ClientName -> String -> IO ()
-tell server@Server{..} Client{..} who msg = do
-  ok <- atomically $ sendToName server who (Tell clientName msg)
-  if ok
-     then return ()
-     else hPutStrLn clientHandle (who ++ " is not connected.")
+lookupOrCreateRoom :: Server -> RoomName -> STM Room
+lookupOrCreateRoom server@Server{..} name = lookupRoom server name >>= \case
+    Nothing -> do
+        room <- newRoom name
+        modifyTVar serverChannels . M.insert name $ room
+        return room
+    Just room -> return room
 
-main :: IO ()
-main = withSocketsDo $ do
-  server <- newServer
-  sock <- listenOn (PortNumber (fromIntegral port))
-  printf "Listening on port %d\n" port
-  forever $ do
-      (handle, host, port) <- accept sock
-      printf "Accepted connection from %s: %s\n" host (show port)
-      forkFinally (talk handle server) (\_ -> hClose handle)
-
-port :: Int
-port = 44444
-
-checkAddClient :: Server -> ClientName -> Handle -> IO (Maybe Client)
-checkAddClient server@Server{..} name handle = atomically $ do
-  clientmap <- readTVar clients
-  if Map.member name clientmap
-    then return Nothing
-    else do client <- newClient name handle Nothing Nothing 
-            writeTVar clients $ Map.insert name client clientmap
-            broadcast server  $ Notice (name ++ " has connected")
-            return (Just client)
-
-removeClient :: Server -> ClientName -> IO ()
-removeClient server@Server{..} name = atomically $ do
-  modifyTVar' clients $ Map.delete name
-  broadcast server $ Notice (name ++ " has disconnected")
-
-talk :: Handle -> Server -> IO ()
-talk handle server@Server{..} = do
-  hSetNewlineMode handle universalNewlineMode
-      -- Swallow carriage returns sent by telnet clients
-  hSetBuffering handle LineBuffering
-  readName
- where
-  readName = do
-    hPutStrLn handle "What is your name?"
-    name <- hGetLine handle
-    if null name
-      then readName
-      else mask $ \restore -> do        -- 1
-             ok <- checkAddClient server name handle
-             case ok of
-               Nothing -> restore $ do  -- 2
-                  hPrintf handle
-                     "The name %s is in use, please choose another\n" name
-                  readName
-               Just client ->
-                  restore (runClient server client) -- 3
-                      `finally` removeClient server name
+handleClient :: Handle -> Server -> IO ()
+handleClient handle server@Server{..} = do
+    -- Swallow carriage returns sent by telnet clients.
+    hSetNewlineMode handle universalNewlineMode
+    hSetBuffering handle LineBuffering
+    readName
+  where
+    readName :: IO ()
+    readName = do
+        hPutStrLn handle "What is your name?"
+        name <- hGetLine handle
+        if null name
+            then readName
 
 runClient :: Server -> Client -> IO ()
-runClient serv@Server{..} client@Client{..} = do
-  race server receive
+runClient server@Server{..} client@{..} = do
+  race_ serverThread receiveThread
   return ()
- where
-  receive = forever $ do
+where
+  receiveThread :: IO ()
+  receiveThread = forever $ do
     msg <- hGetLine clientHandle
     atomically $ sendMessage client (Command msg)
 
-  server = join $ atomically $ do
-        msg <- readTChan clientSendChan
-        return $ do
-            continue <- handleMessage serv client msg
-            when continue $ server
+  serverThread :: IO ()
+  serverThread = join $ atomiacally $ do
+    msg <- clientReadMessage client
+    return $ do
+      continue <- handleMessage server clinet msg
+      when continue $ serverThread
 
 handleMessage :: Server -> Client -> Message -> IO Bool
-handleMessage server client@Client{..} message =
-  case message of
-     Notice msg         -> output $ "*** " ++ msg
-     Tell name msg      -> output $ "*" ++ name ++ "*: " ++ msg
-     Broadcast name msg -> output $ "<" ++ name ++ ">: " ++ msg
-     Command msg ->
-       case words msg of
-           "/tell" : who : what -> do
-               tell server client who (unwords what)
-               return True
-           ["/quit"] ->
-               return False
-           ('/':_):_ -> do
-               hPutStrLn clientHandle $ "Unrecognized command: " ++ msg
-               return True
-           _ -> do
-               atomically $ broadcast server $ Broadcast clientName msg
-               return True
- where
-   output s = do hPutStrLn clientHandle s; return True
+handleMessage _ client (Notice msg)    = sendBytes client ("*** " ++ msg) >> return True
+handleMessage _ client (Broadcast chName clName msg)
+    | clName == clientName client = return True  -- Ignore messages from self.
+    | otherwise                 = sendBytes client (printf "[%s] %s: %s" chName clName msg) >> return True
+handleMessage server client@Client{..} (Command msg) = case words msg of
+    "/join":which:[]    -> joinChannel server client which                    >> return True
+    "/j"   :which:[]    -> joinChannel server client which                    >> return True
+
+    "/quit":[]          ->                                                       return False
+    "/q"   :[]          ->                                                       return False
+
+    ('/':_):_           -> sendBytes client ("Unrecognized command: " ++ msg) >> return True
+    _                   -> atomically (clientBroadcastToChannel client msg)   >> return True
+
+joinChannel :: Server -> Client -> RoomName -> IO ()
+joinChannel server@Server{..} client name = atomically $
+    lookupOrCreateRoom server name >>= clientJoinRoom JoinReasonJoined client
+        
+
+main :: IO ()
+main = withSocketsDo $ do
+    server <- newServer
+    sock <- listenOn (PortNumber (fromIntegral port))
+    _ <- printf "Listening on port %d\n" port
+
+    forever $ do
+        (handle, host, port') <- accept sock
+        _ <- printf "Accepted connection from %s: %s\n" host (show port')
+        forkFinally (handleClient handle server) (\_ -> hClose handle)
+
+port :: Int
+port = 44444
