@@ -1,5 +1,6 @@
 module Types where
 
+
 type ClientName = String
 type RoomName = String
 
