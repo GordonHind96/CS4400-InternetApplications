@@ -3,14 +3,13 @@
 module Main where
 
 import 	         Control.Concurrent (forkFinally)
-import           Control.Monad      (forever)
+import           Control.Monad      (forever,replicateM,when,join)
 import           Network            (PortID(..), accept, listenOn, withSocketsDo)
 import         	 System.IO          (hClose)
 import           Text.Printf        (printf)
 import           Control.Concurrent.Async (race)
 import           Control.Concurrent.STM
 import           Control.Exception        (finally, mask)
-import           Control.Monad
 import           Data.Map (Map)
 import qualified Data.Map                 as M
 import qualified Data.Set                 as S
@@ -118,33 +117,37 @@ joinChannel joiner@Client{..} serverRooms name = atomically $ do
 
 leaveChannel :: String -> Server -> Int -> IO ()
 leaveChannel clientName server roomRef = do
-    roomList <- readTVar server
+    roomList <- readTVarIO server
     case M.lookup roomRef roomList of
         Nothing    -> putStrLn "No room by that name" >> return ()
         Just room -> do
-            clientList <- readTVar (clients room)
-            let newList = M.delete (hash clientName) clientList
-            writeTVar (clients room) newList
-            putStrLn (clientName ++ " left " ++ (roomName room))
+        	remove
+        	sendRoomMessage notification room
+        	putStrLn $ clientName++" has left "++ (roomName room)
+           where
+           	remove = atomically $ do
+           		clientList <- readTVar (clients room)
+           		let newList = M.delete (hash clientName) clientList
+           		writeTVar (clients room) newList
+           	notification = Broadcast "User has left" (clientName ++"\n\n")
 
 deleteChannel :: Server -> Int -> IO ()
-deleteChannel server ref = do
+deleteChannel server ref = atomically $ do
     list <- readTVar server
     case M.lookup ref list of
         Nothing    -> return ()
-        Just aRoom -> do
+        Just room -> do
             let newList = M.delete ref list
             writeTVar server newList
-            putStrLn ("room  " ++ show(ref) ++ " deleted") >> return ()
 
 removeClient :: Server -> String -> IO ()
 removeClient serv name = do
-    rooms <- readTVar serv
+    rooms <- readTVarIO serv
     let roomNames = Prelude.map (\room -> roomName room) (M.elems rooms)
     mapM_ (\room -> kick $ hash room) roomNames
-    where
-        kick roomRef = do 
-            leaveChannel name serv roomRef
+   where
+    kick roomRef = do 
+    	leaveChannel name serv roomRef
 
 runClient :: Server -> Client -> IO ()
 runClient serv client@Client{..} = do
@@ -190,19 +193,14 @@ handleMessage server client@Client{..} message =
      Command msg mainArg ->
        case msg of
            [["CLIENT_IP:",_],["PORT:",_],["CLIENT_NAME:",name]] -> do
-               --Join room 'mainArg'
                return True
            [["JOIN_ID:",id],["CLIENT_NAME:",name]] -> do
-               --leave room, 'mainArg' = room_ref
                return True
            [["PORT:",_],["CLIENT_NAME:",name]] ->
-               --disconnect from server by returning false (see continue in runclient)
                return False
            [["JOIN_ID:",id],["CLIENT_NAME:",name],["MESSAGE:",msgToSend]] -> do
-               --send this message, mainArg = room_ref
                return True
            _ -> do
-               --Ignore unrecognised commands
                return True
  where
    output s = do hPutStrLn clientHandle s; return True
@@ -222,12 +220,11 @@ handleClient handle server = do
                 output $ "HELO text\nIP: 0\nPort: " ++ (show port) ++ "\nStudentID: 14311128\n"
                 readOp
             ["KILL_SERVICE"] -> output "RIP" >> return ()
-            ["JOIN_CHATROOM:",roomName] -> do
+            ["JOIN_CHATROOM:",roomName] -> do 
                 arguments <- getArgs (joinArgs-1)
                 --output roomName
                 case map words arguments of
                     [["CLIENT_IP:",_],["PORT:",_],["CLIENT_NAME:",name]] -> do
-
                         client <- newClient name (hash name) handle
                         joinChannel client server roomName
                         hPutStrLn handle $ "***Welcome, "++name++"***"

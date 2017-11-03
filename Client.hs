@@ -16,9 +16,9 @@ data Client = Client
 -- >>
 
 -- <<newClient
-newClient :: ClientName -> Int -> Handle -> STM Client
+newClient :: ClientName -> Int -> Handle -> IO Client
 newClient name id handle = do
-  chan <- newTChan
+  chan <- newTChanIO
   return Client { clientName     = name
                 , clientID       = id
                 , clientHandle   = handle

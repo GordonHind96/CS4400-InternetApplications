@@ -4,6 +4,7 @@ module Channel where
 
 import           Control.Applicative
 import           Control.Concurrent.STM
+import           System.IO
 import           Data.Map (Map)
 import qualified Data.Map               as M
 import           Data.Set               (Set)
@@ -20,3 +21,8 @@ data Room = Room
 
 type RoomList = TVar (Map Int Room)
 
+sendRoomMessage :: Message -> Room -> IO ()
+sendRoomMessage msg room@Room{..} = atomically $ do
+  clientList <- readTVar clients
+  let roomClients = M.elems clientList
+  mapM_ (\aClient -> sendMessage aClient msg) roomClients
