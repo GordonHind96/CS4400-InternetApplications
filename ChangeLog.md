@@ -1,4 +1,4 @@
-# Revision history for CS4400-InternetApplications
+# Revision history for charserver
 
 ## 0.1.0.0  -- YYYY-mm-dd
 

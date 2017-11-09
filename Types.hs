@@ -10,6 +10,7 @@ type ErrorBody = String
 type CmdArgs = [[String]]
 
 data Message = Notice String
+			 | Response String
              | Tell ClientName String
              | Broadcast ClientName String
              | Command CmdArgs String

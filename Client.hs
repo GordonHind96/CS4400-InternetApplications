@@ -26,5 +26,5 @@ newClient name id handle = do
                 }
 -- Send a message to a client.
 sendMessage :: Client -> Message -> STM ()
-sendMessage Client{..} msg = writeTChan clientSendChan msg
+sendMessage Client{..} = writeTChan clientSendChan
 
