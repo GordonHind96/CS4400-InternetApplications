@@ -99,9 +99,15 @@ newChannel :: Client -> String -> STM Room
 newChannel cli@Client{..} room = do
   clientList <- newTVar $ M.insert clientID cli M.empty
   return Room { roomName = room
-                ,roomRef  = (hashWithSalt 1979 room)
+                ,roomRef  = (hash room)
                 ,clients  = clientList
             } 
+retrieveChannel::RoomRef -> Server -> STM (Maybe Room)
+retrieveChannel roomRef server = do
+	rooms <- readTVar server
+	case M.loopup roomRef rooms of
+		Nothing -> return Nothing
+		Just r -> return $ Just r
 
 joinChannel :: Client -> Server -> String -> IO ()
 joinChannel cli@Client{..} serverRooms name = atomically $ do
@@ -112,31 +118,35 @@ joinChannel cli@Client{..} serverRooms name = atomically $ do
             room <- newChannel cli name
             let updatedRoomList = M.insert (roomRef room) room roomList
             writeTVar serverRooms updatedRoomList
-            response (roomRef room)  
+            response (roomRef room) (roomName room)  
         Just room -> do
             clientList <- readTVar (clients room)
             let newClientList = M.insert clientID cli clientList
             writeTVar (clients room) newClientList
-            response (roomRef room)
+            response (roomRef room) (roomName room)
        where
-       	response ref = sendMessage cli (Response $ "JOINED_CHATROOM: "++clientName++"\nSERVER_IP: 0.0.0.0\nPORT: "++show (fromIntegral port) ++ "\nROOM_REF: " ++ show ref ++"\nJOIN_ID: " ++ show (ref+clientID))
+       	response ref name = sendMessage cli (Response $ "JOINED_CHATROOM:"++name++"\nSERVER_IP:0.0.0.0\nPORT:"++show (fromIntegral port) ++ "\nROOM_REF:" ++ show ref ++"\nJOIN_ID:" ++ show (ref+clientID))
 
 leaveChannel :: Client -> Server -> Int -> IO ()
-leaveChannel client@Client{..} server roomRef = do
-    roomList <- readTVarIO server
-    case M.lookup roomRef roomList of
-        Nothing    -> putStrLn "No room by that name"
-        Just room -> do
-        	remove
-        	sendRoomMessage notification room
-        	putStrLn $ clientName++" has left "++ (roomName room)
-           where
-           	remove = atomically $ do
-           		clientList <- readTVar (clients room)
-           		let newList = M.delete (hash clientName) clientList
-           		writeTVar (clients room) newList
-           		sendMessage client (Response $ "LEFT_CHATROOM: " ++ (show roomRef) ++ "\nJOIN_ID: " ++ (show $ clientID + roomRef) ++ "\n")
-           	notification = Broadcast "User has left" (clientName ++"\n\n")
+leaveChannel client@Client{..} server roomRef = leaver client server roomRef (roomRef+clientID)
+
+leaver :: Client -> Server -> RoomRef -> Int -> IO ()
+leaver cli@Client{..} server roomRef jonRef = do
+	roomList <- atomically $ readTVar server
+	case M.lookup roomRef roomList of
+		Nothing -> putStrLn "No room with that reference"
+		Just room -> do
+			atomically $ sendMessage cli (Response $ "LEFT_CHATROOM:"++ show roomRef ++ "\nJOIN_ID:" ++ show joinRef)
+			remover
+	   where
+	   	remover = atomcally $ do
+	   		clients <- readTvar (members room)
+	   		let roomMembers = M.elems clientSendChan
+	   		mapM_ (\client -> sendMessage client notification) roomMembers
+	   		let newList = M.delete(hash clientName) clients
+	   		writeTvar (members room) newList
+	   	notification = (Broadcast $ "CHAT:" ++ (show roomRef)++"\nCLIENT_NAME:" ++ clietName ++ "\nMESSAGE:" ++ clientName ++ "has left the room.\n\n")
+
 
 deleteChannel :: Server -> Int -> IO ()
 deleteChannel server ref = atomically $ do
@@ -196,23 +206,27 @@ handleMessage server client@Client{..} message =
   case message of
      Notice msg         -> output $ "*** " ++ msg
      Response msg -> output msg
-     Tell name msg      -> output $ "*" ++ name ++ "*: " ++ msg
      Broadcast name msg -> output $ "<" ++ name ++ ">: " ++ msg
      Error heading body -> output $ "->" ++ heading ++ "<-\n" ++ body
      Command msg mainArg -> case msg of
      	[["CLIENT_IP:",_],["PORT:",_],["CLIENT_NAME:",name]] -> do
-     		joinChannel client server mainArg
+     		let msgs = "CHAT:"++(show $ (hash mainArg))++"\nCLIENT_NAME:"++clientName++"\nMESSAGE:"++clientName ++ " has entered the room.\n"
+     		joinChannel client server mainArg >> notifyRoom (hash mainArg) (broadCast msgs)
      		putStrLn "joined"
-     		return True
+
      	[["JOIN_ID:",id],["CLIENT_NAME:",name]] -> do
-     		leaveChannel client server (read mainArg :: Int)
+     		leaver client server (read mainArg :: Int) (read id:: Int)
      		return True
-     	[["PORT:",_],["CLIENT_NAME:",name]] -> return False
+     	[["PORT:",_],["CLIENT_NAME:",name]] -> removeClient server client >> return False
      	[["JOIN_ID:",id],["CLIENT_NAME:",name],("MESSAGE:":msgToSend),[]] -> do
      		notifyRoom (read mainArg :: Int) $ Broadcast ("CHAT: " ++ mainArg) ("CLIENT_NAME: " ++ name ++ "\nMESSAGE: "++(unwords msgToSend)++"\n\n")
      		return True
+     	[["KILL"]] -> do
+     		if mainArg == endService then return False
+     		else return True
      	_ -> do
      		atomically   $ sendMessage client $ Error "Error 1" "Unrecognised Args"
+     		mapM_ putStrLn $ map unwords msg
      		return True
        where
        	reply replyMsg = atomically $ sendMessage client replyMsg
@@ -249,8 +263,19 @@ handleClient handle server = do
                         joinChannel client server roomName
                         hPutStrLn handle $ "**Welcome, "++name++"**"
                         hPutStrLn handle $ name++" entered " ++ roomName
-                        runClient server client `finally` (removeClient server client >> return ())
+                        let msg = "CHAT:"++ (show $ hash roomName)) ++ "\nCLIENT_NAME"++ name++"\nMESSAGE:"++ name++"has entered the room.\n\n"
+						notifyRoom (hash roomName) $ Broadcast msg
+                        runClient server client >> endClient client
                     _ -> output "Unrecognized command" >> readOp
+                    where
+                    	notifyRoom roomRef msg = do
+                    		rooms <- atomically $ readTVar server
+                    		let mRoom = M.lookup roomRef rooms
+                    		case mRoom of
+                    			Nothing -> putStrLn ("No room with ref " ++ (show roomRef)) >> return True
+                    			Just room -? sendRoomMessage msg room >> return True
+                    	endClient = do
+                    		return ()
             _ -> do
                 output "Unreconized command" >> readOp
             where
