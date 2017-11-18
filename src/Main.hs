@@ -263,7 +263,7 @@ handleClient handle server = do
                         joinChannel client server roomName
                         hPutStrLn handle $ "**Welcome, "++name++"**"
                         hPutStrLn handle $ name++" entered " ++ roomName
-                        let msg = "CHAT:"++ (show $ hash roomName)) ++ "\nCLIENT_NAME"++ name++"\nMESSAGE:"++ name++"has entered the room.\n\n"
+                        let msg = "CHAT:"++ (show $ hash roomName) ++ "\nCLIENT_NAME"++ name++"\nMESSAGE:"++ name++"has entered the room.\n\n"
 						notifyRoom (hash roomName) $ Broadcast msg
                         runClient server client >> endClient client
                     _ -> output "Unrecognized command" >> readOp
