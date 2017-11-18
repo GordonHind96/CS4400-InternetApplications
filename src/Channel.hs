@@ -23,9 +23,9 @@ type RoomList = TVar (Map Int Room)
 
 sendRoomMessage :: Message -> Room -> IO ()
 sendRoomMessage msg room@Room{..} = atomically $ do
-	atomically $ notify
+	notify
    where
    	notify = do
-   		clients <- readTVar members
+   		clients <- readTVar clients
    		let mems = M.elems clients
    		mapM_ (\cli -> sendMessage cli msg) mems
