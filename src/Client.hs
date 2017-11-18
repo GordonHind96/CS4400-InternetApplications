@@ -13,9 +13,7 @@ data Client = Client
   , clientHandle   :: Handle
   , clientSendChan :: TChan Message
   }
--- >>
 
--- <<newClient
 newClient :: ClientName -> Int -> Handle -> IO Client
 newClient name id handle = do
   chan <- newTChanIO
@@ -24,7 +22,7 @@ newClient name id handle = do
                 , clientHandle   = handle
                 , clientSendChan = chan
                 }
--- Send a message to a client.
+
 sendMessage :: Client -> Message -> STM ()
 sendMessage Client{..} = writeTChan clientSendChan
 

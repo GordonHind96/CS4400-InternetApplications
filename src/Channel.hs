@@ -15,7 +15,7 @@ import Client
 
 data Room = Room
   { roomName    :: RoomName
-  , roomRef     :: Int
+  , roomRef     :: RoomRef
   , clients     :: TVar (Map Int Client)
   }
 
